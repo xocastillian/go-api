@@ -30,13 +30,14 @@ HEY ?= $(shell command -v hey 2>/dev/null || echo $(shell go env GOPATH)/bin/hey
 #   make load-api LOAD_N=5000 LOAD_C=50
 LOAD_N      ?= 300
 LOAD_C      ?= 20
+LOAD_TIME   ?= 10m   # длительность load-soak (формат Go: 30s, 5m, 1h)
 BENCH_TIME  ?= 15
 BENCH_CLIENTS ?= 20
 LOGIN_EMAIL ?= metrics@demo.dev
 LOGIN_PASS  ?= Sup3rSecret!
 
 .DEFAULT_GOAL := help
-.PHONY: help migrate-up migrate-down migrate-status migrate-create test test-integration docs docs-check fmt fmt-check lint up down logs hooks load-setup load-api load-db
+.PHONY: help migrate-up migrate-down migrate-status migrate-create test test-integration docs docs-check fmt fmt-check lint up down logs hooks load-setup load-api load-soak load-db
 
 # --- Команды ---------------------------------------------------------------
 
@@ -109,6 +110,19 @@ load-api: ## Нагрузочный тест API: hey на login (перемен
 	@test -x "$(HEY)" || { echo "hey не найден: go install github.com/rakyll/hey@latest"; exit 1; }
 	@set -a; [ -f ./.env ] && . ./.env; set +a; \
 	$(HEY) -n $(LOAD_N) -c $(LOAD_C) -m POST \
+		-H "Content-Type: application/json" \
+		-d '{"email":"$(LOGIN_EMAIL)","password":"$(LOGIN_PASS)"}' \
+		http://localhost:$${APP_PORT:-8080}/api/v1/auth/login
+
+# Длительный прогон по ВРЕМЕНИ (режим hey -z), а не по числу запросов.
+# Ровно те же флаги, что у load-api, но "-n 300" заменён на "-z $(LOAD_TIME)".
+# Смысл: 3-секундный рывок ловит только мгновенные поломки; утечки памяти,
+# деградация GC и истощение пулов видны ТОЛЬКО на минутах. Смотри дашборд
+# Grafana ВО ВРЕМЯ прогона: плато RPS и ровная память — то, ради чего это.
+load-soak: ## Длительный прогон на утечки/стабильность (переменные: LOAD_TIME LOAD_C)
+	@test -x "$(HEY)" || { echo "hey не найден: go install github.com/rakyll/hey@latest"; exit 1; }
+	@set -a; [ -f ./.env ] && . ./.env; set +a; \
+	$(HEY) -z $(LOAD_TIME) -c $(LOAD_C) -m POST \
 		-H "Content-Type: application/json" \
 		-d '{"email":"$(LOGIN_EMAIL)","password":"$(LOGIN_PASS)"}' \
 		http://localhost:$${APP_PORT:-8080}/api/v1/auth/login
