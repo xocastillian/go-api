@@ -187,6 +187,47 @@ func (r *Repository) RevokeAllForUser(ctx context.Context, userID uuid.UUID) err
 	return nil
 }
 
+// TrimToLimit держит число ЖИВЫХ сессий пользователя в пределах keep:
+// отзывает все активные токены, КРОМЕ keep самых свежих.
+//
+// Зачем: каждый логин/ротация создают новую строку, а старые живут до
+// конца TTL. Без лимита 55k логинов дают 55k живых сессий (unbounded
+// growth — то, что показал soak-тест). Ограничение "N последних" —
+// стандартное поведение: старое устройство просто разлогинивается.
+//
+// Правила подсчёта:
+//   - считаем только revoked_at IS NULL: отозванные не занимают квоту —
+//     на них держится детект кражи, и "место" они занимать не должны;
+//   - протухшие (expires_at < now) тоже не считаем: они бесполезны и
+//     в любом случае подлежат DeleteExpired.
+//
+// Вызывается ПОСЛЕ Create, поэтому "keep самых свежих" всегда включает
+// только что созданный токен — текущая сессия клиента не пострадает.
+//
+// Порядок по created_at: точность микросекунды; при коллизии (два токена
+// в одну микросекунду) Postgres выберет произвольные, но это безвредно —
+// нам важен сам факт лимита, а не конкретный состав N.
+func (r *Repository) TrimToLimit(ctx context.Context, userID uuid.UUID, keep int) error {
+	const query = `
+		UPDATE refresh_tokens
+		SET revoked_at = now()
+		WHERE user_id = $1
+		  AND revoked_at IS NULL
+		  AND id NOT IN (
+			SELECT id
+			FROM refresh_tokens
+			WHERE user_id = $1 AND revoked_at IS NULL
+			ORDER BY created_at DESC
+			LIMIT $2
+		  )
+	`
+
+	if _, err := r.db.Exec(ctx, query, userID, keep); err != nil {
+		return fmt.Errorf("trim refresh tokens to limit: %w", err)
+	}
+	return nil
+}
+
 // DeleteExpired удаляет протухшие refresh-токены (expires_at < now)
 // и возвращает число удалённых строк.
 //

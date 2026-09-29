@@ -42,6 +42,12 @@ type sessionStore interface {
 	Revoke(ctx context.Context, id uuid.UUID) error
 	RevokeAllForUser(ctx context.Context, userID uuid.UUID) error
 
+	// TrimToLimit — "у юзера не больше keep живых сессий": отозвать все
+	// активные токены, кроме keep самых свежих. Зовётся после Create в
+	// issuePairWith: без него таблица растёт без предела (каждый логин —
+	// новая строка, старые живут до конца TTL).
+	TrimToLimit(ctx context.Context, userID uuid.UUID, keep int) error
+
 	// DeleteExpired — один проход чистки: убрать протухшие, вернуть сколько.
 	// Данные для фоновой чистки (cleanup.go); период задаёт вызывающий.
 	DeleteExpired(ctx context.Context, now time.Time) (int64, error)
@@ -52,6 +58,15 @@ type sessionStore interface {
 	// два зависимых шага, которые обязаны исполниться вместе.
 	WithTx(ctx context.Context, fn func(sessionStore) error) error
 }
+
+// maxSessionsPerUser — сколько ЖИВЫХ refresh-сессий максимум у одного
+// пользователя. Логин сверх лимита работает как обычно, но самые старые
+// сессии отзываются: устройство "вылетело" — стандартное поведение
+// (как стриминговые сервисы выкидывают старый экран при новом входе).
+//
+// Пока константа пакета: лимит один для всех и не просился наружу.
+// Если понадобится разный лимит разным тарифам — вынесем в config/DI.
+const maxSessionsPerUser = 10
 
 // Service — оркестрация жизненного цикла сессии:
 // выдать пару (логин) → обновить с ротацией (refresh) → отозвать (logout).
@@ -97,6 +112,22 @@ func (s *Service) issuePairWith(ctx context.Context, store sessionStore, userID 
 
 	expiresAt := time.Now().Add(s.refreshTTL)
 	if err := store.Create(ctx, userID, hashRefreshToken(refresh), expiresAt); err != nil {
+		return TokenPair{}, err
+	}
+
+	// Ужимаем число сессий до лимита: TrimToLimit отзовёт старейшие живые
+	// токены сверх maxSessionsPerUser (только что созданный — самый свежий,
+	// он в лимит входит и не пострадает).
+	//
+	// Ошибка трима ПРОПАГАГИРУЕТСЯ (логин вернёт 500). Это сознательный
+	// выбор, а не недосмотр: если БД уже сбоит, лучше честный 500, чем
+	// "логин успешен, но состояние непонятно". В Rotate трим и так внутри
+	// транзакции — там атомарность обеспечена WithTx.
+	//
+	// Замечание про атомарность в логине: Create и Trim — два автокоммита.
+	// Сбой между ними оставит юзера на одну сессию больше лимита —
+	// безвредно, ради этого не заводим транзакцию (см. IssuePair).
+	if err := store.TrimToLimit(ctx, userID, maxSessionsPerUser); err != nil {
 		return TokenPair{}, err
 	}
 

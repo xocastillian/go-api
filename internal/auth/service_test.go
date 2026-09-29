@@ -31,6 +31,9 @@ type fakeSessionStore struct {
 	revokedIDs       []uuid.UUID // какие id пришли в Revoke
 	revokeAllUserIDs []uuid.UUID // каких юзеров отозвали целиком
 	created          []refreshRecord
+	trimUserIDs      []uuid.UUID // кого звали TrimToLimit
+	trimKeep         []int       // с каким keep звали TrimToLimit
+	trimErr          error
 
 	// DeleteExpired
 	deleteExpiredErr   error
@@ -80,6 +83,18 @@ func (f *fakeSessionStore) RevokeAllForUser(_ context.Context, userID uuid.UUID)
 		return f.revokeAllErr
 	}
 	f.revokeAllUserIDs = append(f.revokeAllUserIDs, userID)
+	return nil
+}
+
+// TrimToLimit — fake записывает (кого, с каким лимитом) и возвращает
+// управляемую ошибку. Реальные строки он не трогает: проверка "кого
+// отозвали" живёт в интеграционных тестах на настоящем Postgres.
+func (f *fakeSessionStore) TrimToLimit(_ context.Context, userID uuid.UUID, keep int) error {
+	if f.trimErr != nil {
+		return f.trimErr
+	}
+	f.trimUserIDs = append(f.trimUserIDs, userID)
+	f.trimKeep = append(f.trimKeep, keep)
 	return nil
 }
 
@@ -271,6 +286,66 @@ func TestService_Rotate_CreateFails_PropagatesError(t *testing.T) {
 	_, err := svc.Rotate(context.Background(), "valid-token")
 	if !errors.Is(err, createErr) {
 		t.Fatalf("получили %v, ждали ошибку сохранения %v", err, createErr)
+	}
+}
+
+// =====================================================================
+// IssuePair — лимит сессий: после Create должен зваться TrimToLimit
+// с package-константой maxSessionsPerUser. Логин и Rotate идут через
+// issuePairWith, поэтому проверяем оба пути.
+// =====================================================================
+
+func TestService_IssuePair_TrimsSessionsToLimit(t *testing.T) {
+	store := &fakeSessionStore{}
+	svc := newTestService(store, &fakeRoleLookup{role: "user"})
+	userID := uuid.New()
+
+	if _, err := svc.IssuePair(context.Background(), userID, "user"); err != nil {
+		t.Fatalf("IssuePair: %v", err)
+	}
+
+	// Трим звался РОВНО один раз, по правильному юзеру и с правильным лимитом.
+	if len(store.trimUserIDs) != 1 {
+		t.Fatalf("TrimToLimit звался %d раз, ждали 1", len(store.trimUserIDs))
+	}
+	if store.trimUserIDs[0] != userID {
+		t.Errorf("трим звался по %v, ждали %v", store.trimUserIDs[0], userID)
+	}
+	if store.trimKeep[0] != maxSessionsPerUser {
+		t.Errorf("keep = %d, ждали %d", store.trimKeep[0], maxSessionsPerUser)
+	}
+}
+
+func TestService_Rotate_TrimsSessionsToLimit(t *testing.T) {
+	// Ротация тоже создаёт сессию — и тоже обязана тримать.
+	userID := uuid.New()
+	store := &fakeSessionStore{
+		getByHashRecord: refreshRecord{
+			ID:        uuid.New(),
+			UserID:    userID,
+			ExpiresAt: time.Now().Add(time.Hour), // живой токен
+		},
+	}
+	svc := newTestService(store, &fakeRoleLookup{role: "user"})
+
+	if _, err := svc.Rotate(context.Background(), "valid-token"); err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+
+	if len(store.trimUserIDs) != 1 || store.trimUserIDs[0] != userID {
+		t.Errorf("Rotate не тримнул сессии: %v", store.trimUserIDs)
+	}
+}
+
+// TrimToLimit упал → ошибка честно летит наверх (логин = 500),
+// а не глотается молча.
+func TestService_IssuePair_TrimError_Propagates(t *testing.T) {
+	trimErr := errors.New("db down on trim")
+	store := &fakeSessionStore{trimErr: trimErr}
+	svc := newTestService(store, &fakeRoleLookup{role: "user"})
+
+	if _, err := svc.IssuePair(context.Background(), uuid.New(), "user"); !errors.Is(err, trimErr) {
+		t.Fatalf("получили %v, ждали %v", err, trimErr)
 	}
 }
 

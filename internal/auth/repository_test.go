@@ -344,6 +344,105 @@ func TestRepository_WithTx_PanicRollsBack(t *testing.T) {
 	}
 }
 
+// TestRepository_TrimToLimit_KeepsNewestActive проверяет SQL трима на
+// настоящем Postgres: создаем keep+2 токенов (плюс один СТАРЫЙ ОТЗЫВАННЫЙ,
+// чтобы проверить, что отозванные не занимают квоту), тримаем — и убеждаемся:
+//   - живых осталось ровно keep, и это САМЫЕ СВЕЖИЕ (последние созданные);
+//   - отозванный заранее токен не был "спасён" тримом и не съел квоту.
+//
+// Токены создаём ЧЕРЕЗ ПУЛ (закоммичены), трим — на транзакции с откатом:
+// после теста в БД не остаётся мусора (юзер удалится в Cleanup каскадом).
+func TestRepository_TrimToLimit_KeepsNewestActive(t *testing.T) {
+	pool := testsupport.NewPool(t)
+	ctx := context.Background()
+
+	userID := insertUser(t, pool)
+	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, userID) })
+
+	repo := NewRepository(pool)
+	const keep = 3
+
+	// 1) Заранее отозванный старый токен: не должен попасть в "keep свежих".
+	revokedHash := createToken(t, repo, userID)
+	rec, err := repo.GetByHash(ctx, revokedHash)
+	if err != nil {
+		t.Fatalf("get revoked: %v", err)
+	}
+	if err := repo.Revoke(ctx, rec.ID); err != nil {
+		t.Fatalf("revoke old: %v", err)
+	}
+
+	// 2) keep+2 живых токенов. После трима выжить должны два ПОСЛЕДНИХ
+	//    (fresh2, fresh1) и один перед ними — то есть fresh-хвост.
+	const extra = 2
+	hashes := make([]string, 0, keep+extra)
+	for i := 0; i < keep+extra; i++ {
+		hashes = append(hashes, createToken(t, repo, userID))
+	}
+
+	// 3) Трим внутри транзакции (rollback в конце — чистота).
+	tm := newTx(t, pool)
+	txRepo := NewRepository(tm)
+	if err := txRepo.TrimToLimit(ctx, userID, keep); err != nil {
+		t.Fatalf("TrimToLimit: %v", err)
+	}
+
+	// 4) Проверяем по каждому хешу: живой или отозван.
+	//    ВАЖНО: читаем ЧЕРЕЗ ТУ ЖЕ транзакцию (txRepo), а не через пул —
+	//    UPDATE ещё не закоммичен, и пул видит состояние ДО трима.
+	//    Свежие keep штук (конец slices) — живы; всё старше — отозвано.
+	for i, h := range hashes {
+		rec, err := txRepo.GetByHash(ctx, h)
+		if err != nil {
+			t.Fatalf("get token #%d: %v", i, err)
+		}
+		isNewest := i >= extra // индексы extra..end — самые свежие keep штук
+		if isNewest && rec.RevokedAt != nil {
+			t.Errorf("свежий токен #%d неоправданно отозван", i)
+		}
+		if !isNewest && rec.RevokedAt == nil {
+			t.Errorf("старый токен #%d пережил трим (лимит не сработал)", i)
+		}
+	}
+
+	// 5) Заранее отозванный остался отозванным (трим его не "реанимировал").
+	rec, err = txRepo.GetByHash(ctx, revokedHash)
+	if err != nil {
+		t.Fatalf("get revoked after trim: %v", err)
+	}
+	if rec.RevokedAt == nil {
+		t.Error("заранее отозванный токен стал живым после трима")
+	}
+}
+
+// TestRepository_TrimToLimit_UnderLimit_NoOp — если живых сессий МЕНЬШЕ
+// лимита, трим ничего не делает (и тем более не роняет запрос).
+func TestRepository_TrimToLimit_UnderLimit_NoOp(t *testing.T) {
+	pool := testsupport.NewPool(t)
+	ctx := context.Background()
+	tx := newTx(t, pool)
+	repo := NewRepository(tx)
+
+	userID := insertUser(t, tx)
+	h1 := createToken(t, repo, userID)
+	h2 := createToken(t, repo, userID)
+
+	if err := repo.TrimToLimit(ctx, userID, 10); err != nil {
+		t.Fatalf("TrimToLimit: %v", err)
+	}
+
+	// Оба на месте и живы.
+	for _, h := range []string{h1, h2} {
+		rec, err := repo.GetByHash(ctx, h)
+		if err != nil {
+			t.Fatalf("get %q: %v", h, err)
+		}
+		if rec.RevokedAt != nil {
+			t.Errorf("токен %q отозван, хотя сессий меньше лимита", h)
+		}
+	}
+}
+
 // TestRepository_DeleteExpired_DeletesExpiredKeepsLive — правило чистки:
 // убираем ТОЛЬКО expires_at < now, а живые (и отозванные, но не протухшие —
 // на них держится детект кражи) остаются.
