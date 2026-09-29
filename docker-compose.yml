@@ -116,7 +116,83 @@ services:
     depends_on:
       - prometheus
 
+  # =========================================================================
+  # ELK-стек для логов (как на работе): Elasticsearch + Kibana + Filebeat.
+  #
+  #   api stdout -> Docker (json-файлы) -> Filebeat (агент) -> Elasticsearch
+  #   Просмотр: Kibana http://localhost:5601 -> Discover.
+  #
+  # Логи — это НЕ метрики: Prometheus хранит ЧИСЛА (сколько, как быстро),
+  # Elasticsearch хранит СТРОКИ (что именно написано) — поэтому отдельное
+  # хранилище и отдельный интерфейс (Kibana, не Grafana).
+  # =========================================================================
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.17.4
+    container_name: notes_elasticsearch
+    restart: unless-stopped
+    environment:
+      # Один узел без кластера: для dev этого достаточно; в проде — >=3 узлов.
+      discovery.type: single-node
+      # ⚠ СЕКЬЮРИТИ ВЫКЛЮЧЕН — только для dev: без логина/пароля и TLS.
+      # В проде так нельзя: включить security, пароли в секреты, TLS.
+      xpack.security.enabled: "false"
+      # Куча JVM: 512MB — минимум для учебного стенда. По умолчанию ES берёт
+      # ПОЛОВИНУ RAM машины — на ноуте это убийственно. Оперативка сверх кучи
+      # уходит на дисковый кэш индексов, поэтому реальное потребление ~1GB.
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"   # HTTP API (curl localhost:9200/_cat/indices — список индексов)
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30      # ES стартует медленно (JVM) — терпим до ~5 минут
+      start_period: 30s
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.17.4
+    container_name: notes_kibana
+    restart: unless-stopped
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    ports:
+      - "5601:5601"   # веб-интерфейс
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:5601/api/status || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30      # Kibana поднимается ещё дольше ES — норма
+      start_period: 60s
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.17.4
+    container_name: notes_filebeat
+    restart: unless-stopped
+    # Читает файлы контейнеров от имени root: права на docker.sock и логи
+    # обычно есть только у него. Стандартная практика для beats.
+    user: root
+    command: filebeat -e --strict.perms=false
+    volumes:
+      # Конфиг шиппера: что читать и куда слать.
+      - ./docker/filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      # ГДЕ ЖИВУТ ЛОГИ КОНТЕЙНЕРОВ: Docker пишет stdout КАЖДОГО контейнера
+      # в json-файл на диске. На Docker Desktop (mac/win) путь резолвится
+      # ВНУТРИ её Linux-VM — для контейнера это работает одинаково.
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      # Docker-сокет: filebeat спрашивает у Docker'а метаданные (имя контейнера,
+      # образ) для каждого прочитанного файла. Read-only — только читать.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
 volumes:
   pgdata:
   prometheus_data:
   grafana_data:
+  es_data:

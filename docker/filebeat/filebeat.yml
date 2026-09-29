@@ -1,0 +1,32 @@
+# ===========================================================================
+# filebeat.yml — конфиг шиппера логов. Вся его работа описывается здесь:
+# ГДЕ читать логи и КУДА отправлять.
+#
+# Аналогия с уже построенным стеком: filebeat.yml — как prometheus.yml
+# (конфиг сборщика), Elasticsearch — как TSDB Prometheus (хранилище),
+# Kibana — как Grafana (взгляд на данные).
+# ===========================================================================
+
+filebeat.inputs:
+  # Вход "container" — заточен под Docker: сам разбирает json-формат,
+  # в который Docker складывает stdout всех контейнеров
+  # (/var/lib/docker/containers/<id>/<id>-json.log, см. mount в compose).
+  - type: container
+    paths:
+      # '*/*.log' — ВСЕ контейнеры машины: api, db, prometheus... Если
+      # захотим фильтровать — проще делать это запросами в Kibana, а не здесь.
+      - '/var/lib/docker/containers/*/*.log'
+
+processors:
+  # Обогащение: спрашивает у Docker'а (через сокет, см. compose) кто это —
+  # в каждую строку добавляются container.name ("notes_api"), image, labels.
+  # Без этого в Kibana видны только безымянные id-контейнеров.
+  - add_docker_metadata: ~
+
+output.elasticsearch:
+  # Куда слать. Имя сервиса из docker-сети, внутренний порт 9200.
+  hosts: ['http://elasticsearch:9200']
+  # Индекс НЕ задаём вручную: filebeat по умолчанию пишет в
+  # filebeat-<версия>-<дата> и сам грузит шаблон маппингов при старте.
+  # О индексах: это "папки" в ES, по умолчанию — новая на каждый день.
+  # Найти все: curl localhost:9200/_cat/indices

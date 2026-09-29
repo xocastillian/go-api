@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -33,13 +34,48 @@ import (
 // и ТОЛЬКО после возврата run() решить про код выхода.
 // Здесь и только здесь вызывается os.Exit — когда все defer-ы уже отработали.
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	// Лог-настройки грузятся ПЕРВЫМИ и отдельно от полного конфига
+	// (config.LoadLogging): сообщение "не смог загрузить конфиг" должно
+	// уметь выйти в лог уже настроенного логгера — курица и яйцо.
+	logger := slog.New(newHandler(config.LoadLogging()))
 	slog.SetDefault(logger)
 
 	if err := run(); err != nil {
 		logger.Error("fatal", "err", err)
 		os.Exit(1)
 	}
+}
+
+// newHandler собирает slog-хендлер из лог-конфига: формат + минимальный уровень.
+//
+// Format: "text" — человекочитаемые строки (локальная разработка),
+// "json"/неизвестное — JSON (дефолт: docker logs, аггрегаторы, Grafana).
+//
+// Level: LOG_LEVEL=debug даёт больше строк при поиске бага, warn/error
+// глушат шум в проде. Неизвестное значение не валим процесс — логируем
+// предупреждение и берём info: из-за опечатки в .env сервис обязан
+// стартовать, просто с "понятным" уровнем.
+func newHandler(cfg config.LoggingConfig) slog.Handler {
+	var level slog.Level
+	switch strings.ToLower(cfg.Level) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	default:
+		if strings.ToLower(cfg.Level) != "info" && cfg.Level != "" {
+			slog.Warn("unknown LOG_LEVEL, using info", "got", cfg.Level)
+		}
+		level = slog.LevelInfo
+	}
+
+	opts := &slog.HandlerOptions{Level: level}
+	if cfg.Format == "text" {
+		return slog.NewTextHandler(os.Stdout, opts)
+	}
+	return slog.NewJSONHandler(os.Stdout, opts)
 }
 
 // run содержит всю логику запуска и возвращает ошибку вместо os.Exit.

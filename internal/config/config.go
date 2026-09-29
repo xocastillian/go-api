@@ -18,6 +18,30 @@ type Config struct {
 	CORS     CORSConfig
 }
 
+// LoggingConfig — настройки логов (env LOG_LEVEL, LOG_FORMAT).
+// Живёт ОТДЕЛЬНО от Config, и это не случайность, а проблема курицы и яйца:
+// логгер создаётся в main ДО всего остального — а чтобы сообщить об ошибке
+// "конфиг не загрузился", логгер уже должен существовать. Поэтому лог-настройки
+// читаются собственной функцией LoadLogging (ниже) раньше полного Load,
+// и ошибки конфига логируются уже настроенным логгером.
+type LoggingConfig struct {
+	Level  string // debug | info | warn | error (дефолт info)
+	Format string // text (для глаз) | json (для машин; дефолт)
+}
+
+// LoadLogging читает ТОЛЬКО лог-настройки — минимальный ранний конфиг.
+// godotenv.Load ошибку игнорирует осознанно (как в Load): без .env работаем
+// от переменных окружения, что нормально для docker/CI.
+func LoadLogging() LoggingConfig {
+	_ = godotenv.Load()
+	return LoggingConfig{
+		// Валидация значения происходит в parseLevel (main.go): неизвестный
+		// уровень → warn в лог + info как безопасный дефолт.
+		Level:  getEnv("LOG_LEVEL", "info"),
+		Format: getEnv("LOG_FORMAT", "json"),
+	}
+}
+
 // CORSConfig — настройки кросс-доменных запросов (для браузерного фронтенда).
 // CORS защищает не сервер, а браузер: он разрешает JS одной страницы
 // обращаться к API на ДРУГОМ origin'е. Список origin'ов держим явным
