@@ -62,7 +62,7 @@ func run() error {
 
 	// Подключаемся к Postgres: создаём пул и проверяем живой коннект (fail fast).
 	// Если БД недоступна — падаем сразу на старте, а не на первом запросе.
-	pool, err := postgres.NewPool(ctx, cfg.Postgres.DSN())
+	pool, err := postgres.NewPool(ctx, cfg.Postgres.DSN(), cfg.Postgres.MaxConns, cfg.Postgres.MinConns)
 	if err != nil {
 		return fmt.Errorf("connect postgres: %w", err)
 	}

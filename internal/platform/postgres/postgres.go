@@ -12,7 +12,10 @@ import (
 // и возвращает готовый пул либо ошибку.
 // ctx — контекст, чтобы можно было отменить/затаймаутить создание.
 // dsn — строка подключения (postgres://user:pass@host:port/db?...).
-func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
+// maxConns/minConns — размеры пула, приходят из config (env PGX_MAX_CONNS/
+// PGX_MIN_CONNS): раньше были захардкожены, но цифры такого рода
+// подбираются замером и меняются без пересборки кода.
+func NewPool(ctx context.Context, dsn string, maxConns, minConns int32) (*pgxpool.Pool, error) {
 	// ParseConfig разбирает DSN в структуру настроек пула.
 	// Возвращает cfg, которую можно донастроить перед созданием пула.
 	cfg, err := pgxpool.ParseConfig(dsn)
@@ -23,9 +26,9 @@ func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 
 	// Максимум одновременных соединений к БД.
 	// Защищает Postgres от перегрузки: лишние запросы ждут в очереди пула.
-	cfg.MaxConns = 10
-	// Держим минимум 2 соединения «наготове», чтобы не открывать коннект на каждый запрос.
-	cfg.MinConns = 2
+	cfg.MaxConns = maxConns
+	// Держим минимум minConns соединений «наготове», чтобы не открывать коннект на каждый запрос.
+	cfg.MinConns = minConns
 	// Через час закрываем соединение и открываем новое — чтобы не держать «протухшие».
 	cfg.MaxConnLifetime = time.Hour
 	// Простаивающее соединение закрываем через 30 минут — не держим лишние ресурсы.

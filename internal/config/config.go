@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -56,6 +57,19 @@ type PostgresConfig struct {
 	//                  пароль в DSN!) идёт открытым текстом.
 	// Раньше "disable" был захардкожен — и «переехал в прод» бы незаметно.
 	SSLMode string
+
+	// MaxConns — верхний предел одновременных соединений пула к БД
+	// (env PGX_MAX_CONNS). Всё, что не влезло, стоит в очереди пула —
+	// при узкой очереди растёт p99 даже на дешёвых запросах.
+	// Подбирается замером, не "чем больше тем лучше": каждое соединение —
+	// процесс на стороне Postgres (память + переключения контекста),
+	// и сервер БД у нас всё равно один на все окружения.
+	MaxConns int32
+
+	// MinConns — сколько соединений держать открытыми ПРОСТО так
+	// (env PGX_MIN_CONNS), чтобы первый запрос не платил за открытие
+	// коннекта (TCP-хендшейк + auth ≈ единицы миллисекунд).
+	MinConns int32
 }
 
 // DSN собирает строку подключения из полей. Метод на структуре —
@@ -83,6 +97,11 @@ func Load() (*Config, error) {
 			// Дефолт disable — для локальной разработки. В проде задаётся
 			// явно: POSTGRES_SSLMODE=verify-full.
 			SSLMode: getEnv("POSTGRES_SSLMODE", "disable"),
+			// Размеры пула — прежние дефолты, что были захардкожены в
+			// NewPool; поведение "из коробки" не изменилось, но теперь
+			// настраивается без пересборки.
+			MaxConns: getEnvInt32("PGX_MAX_CONNS", 10),
+			MinConns: getEnvInt32("PGX_MIN_CONNS", 2),
 		},
 		JWT: JWTConfig{
 			Secret: getEnv("JWT_SECRET", ""),
@@ -130,6 +149,20 @@ func getDuration(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return d
+}
+
+// getEnvInt32 читает целое число из env. Не задано или не парсится → fallback.
+// int32 — потому что pgxpool.MaxConns/MinConns именно этого типа.
+func getEnvInt32(key string, fallback int32) int32 {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return fallback
+	}
+	n, err := strconv.ParseInt(v, 10, 32)
+	if err != nil {
+		return fallback
+	}
+	return int32(n)
 }
 
 // getList читает из env список через запятую. Обрезает пробелы и выкидывает
