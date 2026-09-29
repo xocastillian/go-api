@@ -23,6 +23,7 @@ import (
 	_ "github.com/timqa/my-rest-api/docs"
 	"github.com/timqa/my-rest-api/internal/auth"
 	"github.com/timqa/my-rest-api/internal/config"
+	"github.com/timqa/my-rest-api/internal/platform/metrics"
 	"github.com/timqa/my-rest-api/internal/platform/postgres"
 	"github.com/timqa/my-rest-api/internal/server"
 	"github.com/timqa/my-rest-api/internal/user"
@@ -72,10 +73,19 @@ func run() error {
 	// Подтверждаем в логах, что связка с БД установлена.
 	slog.Info("connected to postgres", "host", cfg.Postgres.Host, "db", cfg.Postgres.DB)
 
+	// Реестр метрик — один на процесс, создаётся в composition root и
+	// передаётся всем, кто должен в него писать или из него читать.
+	mreg := metrics.New()
+
 	// Собираем HTTP-сервер: роутер, middleware, роуты, таймауты.
 	// CORS-белый список передаём из конфига — сервер сам не знает,
 	// какие origin'ы разрешены, это решает приложение (composition root).
-	srv := server.New(cfg.AppPort, cfg.CORS.AllowedOrigins)
+	// readyFn — readiness-проверка: ping БД под свободным контекстом.
+	// readyz вызывается при живом сервере, поэтому ctx запроса тут
+	// не нужен — берём Background с таймаутом (см. readyTimeout в server).
+	srv := server.New(cfg.AppPort, cfg.CORS.AllowedOrigins, func(ctx context.Context) error {
+		return pool.Ping(ctx)
+	}, mreg)
 
 	// --- Composition root: связываем фичи здесь, в одном месте ---
 	// Слои фичи user собираем "в столбик": pool -> repository -> service -> handler.

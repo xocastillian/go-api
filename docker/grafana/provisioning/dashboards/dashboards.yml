@@ -1,0 +1,10 @@
+# Провижининг дашбордов: из какой папки Grafana подхватывает JSON-дашборды.
+# Каждый файл *.json в /var/lib/grafana/dashboards (см. volume в compose)
+# появится в интерфейсе при старте — руками ничего не создаём.
+apiVersion: 1
+
+providers:
+  - name: default
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards

@@ -1,0 +1,67 @@
+{
+  "title": "API RED",
+  "uid": "api-red",
+  "tags": ["api", "red"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "5s",
+  "time": { "from": "now-30m", "to": "now" },
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "R — Requests/sec (Rate)",
+      "description": "Сколько запросов в секунду обрабатывает API. Смотрите скачки: рост без причины — трафик/атака, падение — деградация.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "sum(rate(http_requests_total[1m]))",
+          "legendFormat": "все запросы"
+        },
+        {
+          "expr": "sum(rate(http_requests_total[1m])) by (path)",
+          "legendFormat": "{{path}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "E — Errors % (доля 5xx)",
+      "description": "Доля ответов со статусом 5xx. Здоровый сервис — около нуля; рост — уходи смотреть логи по запросам.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "100 * sum(rate(http_requests_total{status=~\"5..\"}[5m])) / sum(rate(http_requests_total[5m]))",
+          "legendFormat": "5xx, %"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "D — Duration p99 (латентность 99-го перцентиля)",
+      "description": "99% запросов быстрее этого значения. Среднее скрыло бы хвосты — p99 показывает самую медленную долю трафика.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, path))",
+          "legendFormat": "{{path}} p99"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Requests in flight",
+      "description": "Запросов обслуживается прямо сейчас. Растёт и не падает — запросы застряли (БД, дедлок).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "http_requests_in_flight",
+          "legendFormat": "in flight"
+        }
+      ]
+    }
+  ]
+}

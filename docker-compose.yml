@@ -51,5 +51,72 @@ services:
       db:
         condition: service_healthy
 
+  # =========================================================================
+  # Prometheus — хранилище метрик. Раз в scrape_interval (5s) сам ходит на
+  # api:8080/metrics (pull) и складывает числа в свою временную БД.
+  # Веб-интерфейс: http://localhost:9090 (проверить таргеты: Status -> Targets).
+  # =========================================================================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: notes_prometheus
+    restart: unless-stopped
+    volumes:
+      # Конфиг скрейпа: куда ходить. Монтируем read-only — Prometheus должен
+      # читать его, а менять (из контейнера) не имеет права.
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # Данные (временные ряды) переживают пересоздание контейнера.
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+
+  # =========================================================================
+  # postgres_exporter — мост Postgres -> Prometheus. Сам опрашивает
+  # системные вьюхи БД (pg_stat_database, pg_stat_activity, ...) и переводит
+  # их в /metrics. После этого нагрузочный тест БД виден на графиках
+  # Grafana (дашборд "Postgres Overview") в реальном времени.
+  # =========================================================================
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:latest
+    container_name: notes_postgres_exporter
+    restart: unless-stopped
+    environment:
+      # DSN на БД: по имени сервиса db, внутренний порт 5432 — та же
+      # docker-сеть, что и у api. sslmode=disable — локальная сеть.
+      DATA_SOURCE_NAME: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?sslmode=disable"
+    ports:
+      - "9187:9187"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # =========================================================================
+  # Grafana — визуализация: подключается к Prometheus и рисует графики/
+  # дашборды. Датасорс и дашборды провижинятся автоматически из docker/grafana
+  # (см. provisioning). Веб-интерфейс: http://localhost:3001, логин admin/admin.
+  # ⚠ admin/admin — ТОЛЬКО для локального dev: в проде пароль в секретах
+  # и за балансером с авторизацией.
+  # =========================================================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: notes_grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      # Провижининг: датасорс + список папок с дашбордами.
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      # Сами JSON-дашборды.
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      # Состояние Grafana (созданные руками дашборды, настройки) — в томе.
+      - grafana_data:/var/lib/grafana
+    ports:
+      # 3001 наружу: 3000 оставлен типичному dev-фронтенду (см. CORS-дефолт).
+      - "3001:3000"
+    depends_on:
+      - prometheus
+
 volumes:
   pgdata:
+  prometheus_data:
+  grafana_data:
