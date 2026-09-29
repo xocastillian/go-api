@@ -19,7 +19,7 @@ DB_DSN = postgres://$$POSTGRES_USER:$$POSTGRES_PASSWORD@$${POSTGRES_HOST:-localh
 GOOSE = set -a; . ./.env; set +a; GOOSE_DRIVER=postgres GOOSE_DBSTRING="$(DB_DSN)" go tool goose -dir db/migrations
 
 .DEFAULT_GOAL := help
-.PHONY: help migrate-up migrate-down migrate-status migrate-create test test-integration docs fmt lint up down logs
+.PHONY: help migrate-up migrate-down migrate-status migrate-create test test-integration docs fmt lint up down logs hooks
 
 # --- Команды ---------------------------------------------------------------
 
@@ -62,3 +62,6 @@ down: ## Остановить контейнеры (данные БД сохра
 
 logs: ## Смотреть логи api в реальном времени
 	docker compose logs -f api
+
+hooks: ## Установить pre-commit хуки (нужен lefthook: brew install lefthook)
+	lefthook install
