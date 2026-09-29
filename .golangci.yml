@@ -1,0 +1,70 @@
+# Конфигурация golangci-lint (v2). Агрегатор линтеров под одной командой.
+#
+# Философия: включаем не "всё подряд", а разумный набор, который ловит
+# РЕАЛЬНЫЕ проблемы и не тонет в шуме. Расслабляем правила для тестов —
+# там свои задачи (проверяем поведение, а не стиль).
+#
+# Запуск: make lint   (или: go tool golangci-lint run)
+
+version: "2"
+
+linters:
+  # standard — базовый набор, который сигнализирует о почти любом проекте:
+  # errcheck, govet, ineffassign, staticcheck, unused.
+  # Это разумный дефолт: не переписываем его руками, а дополняем.
+  default: standard
+
+  enable:
+    # bodyclose — не закрытые http.Response.Body (важно для внешних вызовов).
+    - bodyclose
+    # errorlint — корректность работы с ошибками: errors.Is/As, %w-обёртки.
+    - errorlint
+    # gocritic — подозрительные конструкции (копирование в цикле, лишние присваивания).
+    - gocritic
+    # revive — стиль и Go-идиомы (современный форк golint).
+    - revive
+    # misspell — опечатки в комментариях и строках.
+    - misspell
+    # unconvert — лишние приведения типов.
+    - unconvert
+    # whitespace — лишние пустые строки в начале/конце блоков.
+    - whitespace
+    # gosec — безопасности: слабая криптография, хардкод секретов, опасные конструкции.
+    # Проект чувствителен к безопасности (JWT, пароли), поэтому он особенно полезен.
+    - gosec
+
+  settings:
+    # reviv настроим минимально: не хотим тонну замечаний про комментарии
+    # у каждого экспортируемого идентификатора — включаем только важные правила.
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: increment-decrement
+        - name: var-naming
+        - name: range
+        - name: indent-error-flow
+        - name: superfluous-else
+        - name: unused-parameter
+        - name: unreachable-code
+
+  exclusions:
+    # generated: lax — не ругаем сгенерированный код (docs/docs.go от swag).
+    generated: lax
+    rules:
+      # В тестах стиль и "магические" секреты не важны — там свои цели.
+      # Оставляем только линтеры, которые ловят реальные ошибки.
+      - path: _test\.go
+        linters:
+          - gosec
+          - revive
+          - errcheck
+
+formatters:
+  # Форматтеры в v2 живут отдельно от линтеров. gofmt — каноничный вид кода.
+  # Так `make lint` заодно скажет, если что-то не отформатировано.
+  enable:
+    - gofmt

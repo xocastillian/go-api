@@ -1,0 +1,55 @@
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: notes_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    # Собираем образ из Dockerfile в корне проекта.
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: notes_api
+    restart: unless-stopped
+
+    # env_file прокидывает в контейнер ВСЁ из .env: JWT_SECRET, TTL, CORS и т.д.
+    # Тот же файл, из которого приложение читает конфиг локально — конфигурация одна.
+    env_file: .env
+
+    # environment ПЕРЕОПРЕДЕЛЯЕТ отдельные переменные (приоритет ВЫШЕ env_file).
+    # Здесь только то, что обязано отличаться ВНУТРИ docker-сети:
+    #   POSTGRES_HOST: db    — по имени сервиса, а не localhost. localhost внутри
+    #                          контейнера api — это сам api, а не база!
+    #   POSTGRES_PORT: 5432  — контейнер db слушает 5432; наружу проброшен другой
+    #                          порт (${POSTGRES_PORT}), но внутри сети это неважно.
+    #   APP_PORT: 8080       — фиксируем порт внутри контейнера (см. ports ниже).
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      APP_PORT: 8080
+
+    # Хост-порт берём из APP_PORT (.env, по умолчанию 8080); внутри — 8080.
+    ports:
+      - "${APP_PORT:-8080}:8080"
+
+    # Стартуем ТОЛЬКО когда БД пройдёт healthcheck: миграции на старте
+    # (entrypoint.sh) не должны бежать по ещё не поднявшейся базе.
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

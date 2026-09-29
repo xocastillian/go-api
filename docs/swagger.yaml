@@ -1,0 +1,324 @@
+basePath: /api/v1
+definitions:
+  ErrorResponse:
+    properties:
+      error:
+        type: string
+    type: object
+  authResponse:
+    properties:
+      access_token:
+        type: string
+      refresh_token:
+        type: string
+      user:
+        $ref: '#/definitions/userResponse'
+    type: object
+  changePasswordRequest:
+    properties:
+      new_password:
+        maxLength: 72
+        minLength: 8
+        type: string
+      old_password:
+        type: string
+    required:
+    - new_password
+    - old_password
+    type: object
+  loginRequest:
+    properties:
+      email:
+        type: string
+      password:
+        type: string
+    required:
+    - email
+    - password
+    type: object
+  refreshRequest:
+    properties:
+      refresh_token:
+        type: string
+    required:
+    - refresh_token
+    type: object
+  registerRequest:
+    properties:
+      email:
+        type: string
+      password:
+        maxLength: 72
+        minLength: 8
+        type: string
+    required:
+    - email
+    - password
+    type: object
+  tokenPairResponse:
+    properties:
+      access_token:
+        type: string
+      refresh_token:
+        type: string
+    type: object
+  userResponse:
+    properties:
+      email:
+        type: string
+      id:
+        type: string
+      role:
+        type: string
+    type: object
+  usersResponse:
+    properties:
+      limit:
+        type: integer
+      offset:
+        type: integer
+      users:
+        items:
+          $ref: '#/definitions/userResponse'
+        type: array
+    type: object
+info:
+  contact: {}
+  title: My REST API
+paths:
+  /admin/users:
+    get:
+      parameters:
+      - description: Размер страницы (1..100, по умолчанию 20)
+        in: query
+        name: limit
+        type: integer
+      - description: Смещение (>= 0)
+        in: query
+        name: offset
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/usersResponse'
+        "400":
+          description: Невалидные параметры
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        "401":
+          description: Нет или протух токен
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        "403":
+          description: Недостаточно прав
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Список пользователей (только админ)
+      tags:
+      - admin
+  /auth/login:
+    post:
+      consumes:
+      - application/json
+      description: Проверяет email/пароль и возвращает пару токенов.
+      parameters:
+      - description: Email и пароль
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/loginRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/authResponse'
+        "400":
+          description: Невалидное тело запроса
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        "401":
+          description: Неверные учётные данные
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+      summary: Вход
+      tags:
+      - auth
+  /auth/logout:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Refresh-токен
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/refreshRequest'
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: Сессия отозвана
+        "400":
+          description: Невалидное тело запроса
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+      summary: Выход (отзыв refresh-токена)
+      tags:
+      - auth
+  /auth/logout-all:
+    post:
+      description: Отзывает ВСЕ активные refresh-сессии пользователя, включая текущую.
+      responses:
+        "204":
+          description: Все сессии отозваны
+        "401":
+          description: Нет или протух токен
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Выход со всех устройств
+      tags:
+      - auth
+  /auth/refresh:
+    post:
+      consumes:
+      - application/json
+      description: Принимает refresh-токен, отзывает его и выдаёт новую пару (ротация).
+      parameters:
+      - description: Refresh-токен
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/refreshRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/tokenPairResponse'
+        "400":
+          description: Невалидное тело запроса
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        "401":
+          description: Недействительный refresh-токен
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+      summary: Обновление пары токенов
+      tags:
+      - auth
+  /auth/register:
+    post:
+      consumes:
+      - application/json
+      description: Создаёт аккаунт и сразу возвращает пару токенов (access + refresh).
+      parameters:
+      - description: Email и пароль
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/registerRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/authResponse'
+        "400":
+          description: Невалидное тело запроса
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        "409":
+          description: Email уже занят
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+      summary: Регистрация пользователя
+      tags:
+      - auth
+  /me:
+    delete:
+      description: Физически удаляет пользователя; заметки и сессии уходят каскадом.
+      responses:
+        "204":
+          description: Аккаунт удалён
+        "401":
+          description: Нет или протух токен
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Удаление аккаунта
+      tags:
+      - user
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/userResponse'
+        "401":
+          description: Нет или протух токен
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        "404":
+          description: Пользователь не найден
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Профиль текущего пользователя
+      tags:
+      - user
+  /me/password:
+    patch:
+      consumes:
+      - application/json
+      description: Проверяет старый пароль, ставит новый и отзывает все refresh-сессии.
+      parameters:
+      - description: Старый и новый пароль
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/changePasswordRequest'
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: Пароль изменён
+        "400":
+          description: Невалидное тело запроса
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        "401":
+          description: Неверный старый пароль или токен
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Смена пароля
+      tags:
+      - user
+securityDefinitions:
+  BearerAuth:
+    description: Bearer <access_token>
+    in: header
+    name: Authorization
+    type: apiKey
+swagger: "2.0"
