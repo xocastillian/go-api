@@ -1,0 +1,203 @@
+# ===========================================================================
+# ci.yml — GitHub Actions pipeline.
+#
+# Как это устроено: Actions следит за событиями git (push, pull_request).
+# На каждое событие GitHub поднимает ВРЕМЕННУЮ виртуалку (runner, свежий
+# ubuntu-latest), клонирует репо и выполняет jobs из этого файла.
+# Виртуалка умирает после прогона — CI это "чистая комната": если собралось
+# тут, соберётся и у нового разработчика, ничего "залетевшего" в окружении.
+#
+# Правило разделения труда (помнишь lefthook.yml?):
+#   pre-commit (локально)  — быстрые проверки: fmt, lint, юнит-тесты.
+#   CI (здесь)             — ПОЛНЫЙ прогон: интеграция с живым Postgres,
+#                            докер-сборка. + защита от `git commit --no-verify`.
+# Все проверки зовут make-таргеты — один источник правды, хук и CI
+# проверяют ОДИНАКОВО.
+# ===========================================================================
+name: CI
+
+# --- Когда запускать -------------------------------------------------------
+# push в main + любые pull_request. На PR — проверка ДО мержа; на push в
+# main — проверка того, что реально попало в репозиторий (в т.ч. прямые
+# пуш-коммиты, как у нас сейчас).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# --- Отмена устаревших прогонов -------------------------------------------
+# Ты запушил 3 коммита подряд — прежние 2 прогона уже неактуальны: результат
+# нужен только для последнего коммита. concurrency отменяет "хвост" —
+# экономит минуты (в бесплатном тарифе они лимитированы) и очередь.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ==========================================================================
+  # JOB 1: статические проверки. Быстрые, без окружения — идут первыми,
+  # чтобы битый код не тратил минуты на более дорогие джобы.
+  # ==========================================================================
+  lint:
+    name: Lint / fmt / docs
+    runs-on: ubuntu-latest
+    steps:
+      # Клонируем репозиторий в рабочую директорию runner'а.
+      - uses: actions/checkout@v5
+
+      # Ставим Go и включаем кэш build-артефактов по ключу go.sum.
+      # go-version-file — версия читается из go.mod: ЕДИНЫЙ источник правды,
+      # не дублируем "1.27" в workflow. Кэш важен: `go tool golangci-lint`
+      # собирает линтер из исходников (~2 мин на холодном runner'е) —
+      # со второго прогона берётся из кэша за секунды.
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Линтер (golangci-lint)
+        run: make lint
+
+      - name: Форматирование (gofmt, без изменений файлов)
+        run: make fmt-check
+
+      # Регенерим Swagger и просим git показать, изменились ли docs/.
+      # Изменились — значит аннотации поправили, а документацию забыли
+      # перегенерить. Тот же приём в проде зовут "generated code drift check".
+      - name: Актуальность Swagger-документации
+        run: make docs-check
+
+  # ==========================================================================
+  # JOB 2: юнит-тесты. Отдельная джоба (а не шаг в lint) — джобы Actions
+  # идут ПАРАЛЛЕЛЬНО: lint и тесты не ждут друг друга.
+  # ==========================================================================
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      # make test = go test ./... — БЕЗ тега integration: интеграционные
+      # тесты компилируются (проверка сборки), но не запускаются.
+      - name: Юнит-тесты
+        run: make test
+
+  # ==========================================================================
+  # JOB 3: интеграционные тесты с живым Postgres.
+  #
+  # services — фишка Actions: перед steps GitHub поднимает докер-контейнеры
+  # (service containers). Локальный аналог наших docker-compose сервисов:
+  # runner'у нужна БД, и мы её даём. Виртуалка умрёт вместе с контейнером
+  # после прогона — состояние между прогонами не течёт.
+  # ==========================================================================
+  test-integration:
+    name: Integration tests (Postgres)
+    runs-on: ubuntu-latest
+
+    # env на уровне джобы виден ВСЕМ steps (сервису — отдельный env ниже,
+    # внутри его контейнера). Эти переменные — для migrate-up и тестов:
+    # config.Load() прочитает их через os.LookupEnv, .env в CI не существует.
+    env:
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ci
+      POSTGRES_PASSWORD: ci
+      POSTGRES_DB: ci_test
+      # Тесты через config.Load() требуют непустой JWT_SECRET (fail fast).
+      # В тестах токены не проверяются этим секретом, поэтому сойдёт
+      # любая заглушка — секрет CI-джобы ничего не защищает.
+      JWT_SECRET: ci-dummy-not-a-secret
+
+    services:
+      postgres:
+        image: postgres:17-alpine # та же версия, что в docker-compose!
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci_test
+        # Контейнер должен слушать порт на runner'е: тесты идут с
+        # localhost:5432, а не внутри докер-сети (не как в compose!).
+        ports:
+          - 5432:5432
+        # Ждём готовности БД: без health check тесты могли бы стартовать
+        # раньше Postgres и ложно упасть с "connection refused".
+        # pg_isready готова учтиво: это родной тест живости Postgres.
+        options: >-
+          --health-cmd "pg_isready -U ci -d ci_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # ВАЖНО: интеграционные тесты сами НЕ создают схему — они ждут
+      # накатенные миграции (локально это делает entrypoint при make up).
+      # В CI база свежая и ПУСТАЯ, поэтому миграции накатываем здесь,
+      # ровно так же, как это делает entrypoint в проде.
+      - name: Миграции
+        run: make migrate-up
+
+      - name: Интеграционные тесты
+        run: make test-integration
+
+  # ==========================================================================
+  # JOB 4: сборка докер-образа. needs = выполняется ТОЛЬКО после того,
+  # как все три джобы выше прошли: нет смысла паковать в образ код,
+  # который не прошёл проверки (правило "build only green").
+  # ==========================================================================
+  docker:
+    name: Docker build (+ push в GHCR)
+    runs-on: ubuntu-latest
+    needs: [lint, test, test-integration]
+
+    # GITHUB_TOKEN — временный токен этого прогона. По умолчанию read-only;
+    # для пуша образа в реестр (GitHub Container Registry) нужно packages: write.
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # Buildx — современный движок сборки докера: умеет кэшировать слои
+      # между прогонами (cache-from/cache-to ниже) — пересборка не тратит
+      # минуты на установку зависимостей в образе.
+      - uses: docker/setup-buildx-action@v3
+
+      # Логин в GHCR нужен только для ПУША. На PR даже не логинимся:
+      # PR может прийти из форка, где токен ограничен, а собирать образ
+      # для проверки можно и без реестра.
+      - name: Логин в GitHub Container Registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Сборка образа
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # На PR — только сборка (проверить, что Dockerfile живой);
+          # на push в main — сборка + пуш в реестр.
+          push: ${{ github.event_name == 'push' }}
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+          # Кэш слоёв в кэше GitHub Actions: следующий прогон начнёт не с нуля.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Метаданные сборки в образ (git sha, build time) — привычка из
+          # прод-практики: по образу можно понять, из чего он собран.
+          labels: |
+            org.opencontainers.image.source=${{ github.repositoryUrl }}
+            org.opencontainers.image.revision=${{ github.sha }}

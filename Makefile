@@ -16,10 +16,12 @@ DB_DSN = postgres://$$POSTGRES_USER:$$POSTGRES_PASSWORD@$${POSTGRES_HOST:-localh
 
 # Общая обёртка: подгружаем .env в окружение шелла и запускаем goose.
 # `set -a` авто-экспортирует переменные из .env — их увидят дочерние процессы.
-GOOSE = set -a; . ./.env; set +a; GOOSE_DRIVER=postgres GOOSE_DBSTRING="$(DB_DSN)" go tool goose -dir db/migrations
+# `[ -f ./.env ] &&` — загружаем файл ТОЛЬКО если он есть: в CI .env нет,
+# все POSTGRES_* приходят из environment джобы, и источник правды тот же.
+GOOSE = set -a; [ -f ./.env ] && . ./.env; set +a; GOOSE_DRIVER=postgres GOOSE_DBSTRING="$(DB_DSN)" go tool goose -dir db/migrations
 
 .DEFAULT_GOAL := help
-.PHONY: help migrate-up migrate-down migrate-status migrate-create test test-integration docs fmt lint up down logs hooks
+.PHONY: help migrate-up migrate-down migrate-status migrate-create test test-integration docs docs-check fmt fmt-check lint up down logs hooks
 
 # --- Команды ---------------------------------------------------------------
 
@@ -44,6 +46,17 @@ docs: ## Перегенерировать Swagger-документацию в do
 
 fmt: ## Форматировать Go-код (gofmt -w ./cmd ./internal)
 	gofmt -w ./cmd ./internal
+
+fmt-check: ## Проверить форматирование, НЕ меняя файлы (для CI)
+	@out=$$(gofmt -l ./cmd ./internal); \
+	if [ -n "$$out" ]; then \
+		echo "файлы не отформатированы (запусти make fmt):"; echo "$$out"; exit 1; \
+	fi
+
+docs-check: ## Перегенерировать Swagger и упасть, если docs/ устарели
+	@go tool swag init -g cmd/api/main.go -o docs --parseInternal --parseDependency --useStructName >/dev/null
+	@git diff --exit-code -- docs >/dev/null || \
+		{ echo "docs/ неактуальны: поменялись аннотации Swagger — запусти make docs и закоммить"; exit 1; }
 
 lint: ## Проверить код линтером (golangci-lint, конфиг .golangci.yml)
 	go tool golangci-lint run
